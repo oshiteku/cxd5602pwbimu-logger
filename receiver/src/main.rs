@@ -113,8 +113,8 @@ fn run() -> Result<()> {
         }
     }
     
-    // Ensure all data is flushed before exit
-    writer.flush()?;
+    // Close the writer to ensure all data is flushed and the file is finalized
+    writer.close()?;
     
     println!("Receiver shutdown complete");
     
