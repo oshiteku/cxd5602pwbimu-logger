@@ -147,12 +147,17 @@ impl SerialReaderWorker {
 
         // Open the serial port
         let mut port = open_serial_port(&self.port_name, self.baud_rate)?;
+        let mut consecutive_errors = 0;
 
         while running.load(Ordering::SeqCst) {
             // Try to read a line from the serial port
             match read_serial_data(&mut port) {
                 Ok(line) => {
+                    // Reset error counter on successful read
+                    consecutive_errors = 0;
+
                     if line.trim().is_empty() {
+                        // No complete line yet, continue reading
                         continue;
                     }
 
@@ -172,8 +177,17 @@ impl SerialReaderWorker {
                 }
                 Err(e) => {
                     // Log the error but continue trying to read
-                    eprintln!("Error reading from serial port: {}", e);
-                    thread::sleep(StdDuration::from_millis(100));
+                    consecutive_errors += 1;
+
+                    // Only log errors occasionally to prevent flooding the console
+                    if consecutive_errors <= 3 || consecutive_errors % 100 == 0 {
+                        eprintln!("Error reading from serial port: {}", e);
+                    }
+
+                    // Back off with increasing sleep time on consecutive errors
+                    // but keep it minimal to not miss data
+                    let sleep_ms = (consecutive_errors.min(10) * 5) as u64;
+                    thread::sleep(StdDuration::from_millis(sleep_ms));
                 }
             }
         }
