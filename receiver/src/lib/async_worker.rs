@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -65,14 +65,14 @@ impl FileWriterWorker {
     /// intervals and writes incoming data to Parquet files.
     ///
     /// # Arguments
-    /// * `rx` - Receiver channel for incoming sensor data
+    /// * `rx` - Receiver channel for incoming batches of sensor data
     /// * `running` - Atomic flag indicating whether the process should continue running
     ///
     /// # Returns
     /// Result indicating success or error
     pub fn process_data_loop(
         mut self,
-        rx: Receiver<SensorData>,
+        rx: Receiver<Vec<SensorData>>,
         running: Arc<AtomicBool>,
     ) -> Result<()> {
         println!("File writer thread started");
@@ -86,11 +86,17 @@ impl FileWriterWorker {
                 self.last_rotation = Utc::now();
             }
 
-            // Try to receive data with a timeout
+            // Try to receive data batch with a timeout
             match rx.recv_timeout(StdDuration::from_millis(100)) {
-                Ok(data) => {
-                    // Add the data to the writer
-                    self.writer.add_data(data)?;
+                Ok(data_batch) => {
+                    // Process each data point in the batch
+                    for data in data_batch {
+                        // Add the data to the writer
+                        self.writer.add_data(data)?;
+                    }
+
+                    // Explicitly flush after each batch
+                    self.writer.flush()?;
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // No data received within timeout, check if we should continue
@@ -117,9 +123,11 @@ impl FileWriterWorker {
 /// This struct is responsible for reading data from the serial port,
 /// parsing it into sensor data structures, and sending that data to the
 /// file writer thread. It also provides a simulation mode for testing.
+/// Implements buffering on the producer side for better performance.
 pub struct SerialReaderWorker {
     port_name: String,
     baud_rate: u32,
+    buffer_size: usize,
 }
 
 impl SerialReaderWorker {
@@ -128,25 +136,31 @@ impl SerialReaderWorker {
     /// # Arguments
     /// * `port_name` - Name of the serial port to read from
     /// * `baud_rate` - Baud rate for the serial connection
+    /// * `buffer_size` - Number of records to buffer before sending
     ///
     /// # Returns
     /// A new SerialReaderWorker instance
-    pub fn new(port_name: String, baud_rate: u32) -> Self {
+    pub fn new(port_name: String, baud_rate: u32, buffer_size: usize) -> Self {
         SerialReaderWorker {
             port_name,
             baud_rate,
+            buffer_size,
         }
     }
 
     /// Read data from the serial port and send it to the writer thread
-    pub fn read_serial_loop<F>(self, running: Arc<AtomicBool>, mut data_callback: F) -> Result<()>
-    where
-        F: FnMut(SensorData) -> Result<()>,
-    {
+    pub fn read_serial_loop(
+        self,
+        running: Arc<AtomicBool>,
+        tx: mpsc::Sender<Vec<SensorData>>,
+    ) -> Result<()> {
         println!("Serial reader thread started");
 
         // Open the serial port
         let mut port = open_serial_port(&self.port_name, self.baud_rate)?;
+
+        // Create a buffer for accumulating sensor data
+        let mut buffer: Vec<SensorData> = Vec::with_capacity(self.buffer_size);
 
         while running.load(Ordering::SeqCst) {
             // Try to read a line from the serial port
@@ -159,9 +173,21 @@ impl SerialReaderWorker {
                     // Parse the line into sensor data
                     match parse_sensor_data(&line) {
                         Ok(data) => {
-                            // Send the data to the writer thread
-                            if let Err(e) = data_callback(data) {
-                                eprintln!("Error sending data to writer: {}", e);
+                            // Add data to buffer
+                            buffer.push(data);
+
+                            // If buffer is full, send it to the writer thread
+                            if buffer.len() >= self.buffer_size {
+                                // Clone the buffer to send
+                                let data_to_send = buffer.clone();
+
+                                // Clear the buffer
+                                buffer.clear();
+
+                                // Send the data to the writer thread
+                                if let Err(e) = tx.send(data_to_send) {
+                                    eprintln!("Error sending data to writer: {}", e);
+                                }
                             }
                         }
                         Err(e) => {
@@ -178,20 +204,31 @@ impl SerialReaderWorker {
             }
         }
 
+        // Send any remaining data in the buffer
+        if !buffer.is_empty() {
+            if let Err(e) = tx.send(buffer) {
+                eprintln!("Error sending final data to writer: {}", e);
+            }
+        }
+
         println!("Serial reader thread shutting down");
         Ok(())
     }
 
     /// Simulate serial data for testing
-    pub fn simulate_data_loop<F>(self, running: Arc<AtomicBool>, mut data_callback: F) -> Result<()>
-    where
-        F: FnMut(SensorData) -> Result<()>,
-    {
+    pub fn simulate_data_loop(
+        self,
+        running: Arc<AtomicBool>,
+        tx: mpsc::Sender<Vec<SensorData>>,
+    ) -> Result<()> {
         println!("Simulated serial reader thread started");
 
         let mut i = 0;
         // Generate a fixed number of samples in test mode
         let max_samples = if cfg!(test) { 20 } else { u32::MAX };
+
+        // Create a buffer for accumulating sensor data
+        let mut buffer: Vec<SensorData> = Vec::with_capacity(self.buffer_size);
 
         while running.load(Ordering::SeqCst) && i < max_samples {
             // Create simulated data
@@ -207,9 +244,21 @@ impl SerialReaderWorker {
                 system_timestamp: Utc::now().timestamp_millis(),
             };
 
-            // Send the data to the writer thread
-            if let Err(e) = data_callback(data) {
-                eprintln!("Error sending data to writer: {}", e);
+            // Add data to buffer
+            buffer.push(data);
+
+            // If buffer is full, send it to the writer thread
+            if buffer.len() >= self.buffer_size {
+                // Clone the buffer to send
+                let data_to_send = buffer.clone();
+
+                // Clear the buffer
+                buffer.clear();
+
+                // Send the data to the writer thread
+                if let Err(e) = tx.send(data_to_send) {
+                    eprintln!("Error sending data to writer: {}", e);
+                }
             }
 
             // Increment counter and wait
@@ -222,6 +271,13 @@ impl SerialReaderWorker {
             }
 
             thread::sleep(StdDuration::from_millis(100));
+        }
+
+        // Send any remaining data in the buffer
+        if !buffer.is_empty() {
+            if let Err(e) = tx.send(buffer) {
+                eprintln!("Error sending final data to writer: {}", e);
+            }
         }
 
         println!("Simulated serial reader thread shutting down");
@@ -244,19 +300,19 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap().to_string();
 
-        // Create a channel for passing sensor data
+        // Create a channel for passing sensor data batches
         let (tx, rx) = mpsc::channel();
 
         // Create a running flag
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
-        // Create a ParquetWriter
+        // Create a ParquetWriter (buffer size = 1 since tx side handles buffering)
         let writer = ParquetWriter::new(
             &dir_path,
             "test_log",
             CompressionType::Snappy,
-            10, // Small buffer size to ensure writes happen
+            1, // Small buffer size since we handle buffering on tx side
         )
         .unwrap();
 
@@ -272,7 +328,8 @@ mod tests {
             worker.process_data_loop(rx, running_clone).unwrap();
         });
 
-        // Send some test data
+        // Create a test data batch
+        let mut data_batch = Vec::with_capacity(5);
         for i in 0..5 {
             let data = SensorData {
                 timestamp: i,
@@ -285,8 +342,11 @@ mod tests {
                 az: 1.2 * i as f32,
                 system_timestamp: Utc::now().timestamp_millis(),
             };
-            tx.send(data).unwrap();
+            data_batch.push(data);
         }
+
+        // Send the data batch
+        tx.send(data_batch).unwrap();
 
         // Wait a bit for processing
         thread::sleep(StdDuration::from_millis(500));
@@ -321,7 +381,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap().to_string();
 
-        // Create a channel for passing sensor data
+        // Create a channel for passing sensor data batches
         let (tx, rx) = mpsc::channel();
 
         // Create a running flag
@@ -334,7 +394,7 @@ mod tests {
             &dir_path,
             "test_integrated",
             CompressionType::Snappy,
-            10, // Small buffer size to ensure writes happen
+            1, // Small buffer size since we handle buffering on tx side
         )
         .unwrap();
 
@@ -351,16 +411,11 @@ mod tests {
         });
 
         // Create and start SerialReaderWorker (simulation mode) in a separate thread
-        let reader_worker = SerialReaderWorker::new("test_port".to_string(), 115200);
+        let reader_worker = SerialReaderWorker::new("test_port".to_string(), 115200, 5);
 
         let reader_handle = thread::spawn(move || {
-            let tx_clone = tx;
             reader_worker
-                .simulate_data_loop(running_clone2, move |data| {
-                    tx_clone
-                        .send(data)
-                        .map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
-                })
+                .simulate_data_loop(running_clone2, tx)
                 .unwrap();
         });
 

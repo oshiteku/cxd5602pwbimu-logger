@@ -24,12 +24,12 @@ fn test_end_to_end_async_processing() -> Result<()> {
     let running_writer = running.clone();
     let running_reader = running.clone();
 
-    // Create parquet writer
+    // Create parquet writer with buffer size 1 since tx side handles buffering
     let writer = ParquetWriter::new(
         &dir_path,
         "async_test",
         CompressionType::Snappy,
-        10, // Small buffer size for testing
+        1, // Small buffer size since tx side handles buffering
     )?;
 
     // Create file writer worker
@@ -40,8 +40,8 @@ fn test_end_to_end_async_processing() -> Result<()> {
         "async_test".to_string(),
     );
 
-    // Create serial reader worker in simulation mode
-    let serial_reader = SerialReaderWorker::new("test_port".to_string(), 115200);
+    // Create serial reader worker in simulation mode with buffer
+    let serial_reader = SerialReaderWorker::new("test_port".to_string(), 115200, 5);
 
     // Start file writer thread
     let writer_handle = thread::spawn(move || {
@@ -52,12 +52,7 @@ fn test_end_to_end_async_processing() -> Result<()> {
 
     // Start serial reader thread in simulation mode
     let reader_handle = thread::spawn(move || {
-        let tx_clone = tx;
-        if let Err(e) = serial_reader.simulate_data_loop(running_reader, move |data| {
-            tx_clone
-                .send(data)
-                .map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
-        }) {
+        if let Err(e) = serial_reader.simulate_data_loop(running_reader, tx) {
             eprintln!("Error in serial reader thread: {}", e);
         }
     });
@@ -102,12 +97,12 @@ fn test_file_rotation() -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let running_writer = running.clone();
 
-    // Create parquet writer
+    // Create parquet writer with buffer size 1 since tx side handles buffering
     let writer = ParquetWriter::new(
         &dir_path,
         "rotation_test",
         CompressionType::Snappy,
-        5, // Small buffer size for testing
+        1, // Small buffer size since tx side handles buffering
     )?;
 
     // Create file writer worker with very short rotation time for testing
@@ -125,7 +120,8 @@ fn test_file_rotation() -> Result<()> {
         }
     });
 
-    // Send some data
+    // Create a batch of data to send
+    let mut data_batch = Vec::with_capacity(10);
     for i in 0..10 {
         let data = SensorData {
             timestamp: i,
@@ -138,8 +134,11 @@ fn test_file_rotation() -> Result<()> {
             az: 1.2 * i as f32,
             system_timestamp: chrono::Utc::now().timestamp_millis(),
         };
-        tx.send(data)?;
+        data_batch.push(data);
     }
+
+    // Send the batch
+    tx.send(data_batch)?;
 
     // Give time for data to be processed
     thread::sleep(Duration::from_millis(300));
