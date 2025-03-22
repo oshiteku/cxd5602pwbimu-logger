@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration as StdDuration;
 
+use super::serial::{open_serial_port, parse_sensor_data, read_serial_data};
 use super::ParquetWriter;
 use super::SensorData;
-use super::serial::{open_serial_port, parse_sensor_data, read_serial_data};
 
 /// Worker for handling file writing in a separate thread
-/// 
+///
 /// This struct is responsible for writing sensor data to Parquet files,
 /// handling file rotation, and managing the background file writing operations.
 pub struct FileWriterWorker {
@@ -113,7 +113,7 @@ impl FileWriterWorker {
 }
 
 /// Worker for reading serial data in a separate thread
-/// 
+///
 /// This struct is responsible for reading data from the serial port,
 /// parsing it into sensor data structures, and sending that data to the
 /// file writer thread. It also provides a simulation mode for testing.
@@ -139,11 +139,7 @@ impl SerialReaderWorker {
     }
 
     /// Read data from the serial port and send it to the writer thread
-    pub fn read_serial_loop<F>(
-        self,
-        running: Arc<AtomicBool>,
-        mut data_callback: F,
-    ) -> Result<()>
+    pub fn read_serial_loop<F>(self, running: Arc<AtomicBool>, mut data_callback: F) -> Result<()>
     where
         F: FnMut(SensorData) -> Result<()>,
     {
@@ -187,11 +183,7 @@ impl SerialReaderWorker {
     }
 
     /// Simulate serial data for testing
-    pub fn simulate_data_loop<F>(
-        self,
-        running: Arc<AtomicBool>,
-        mut data_callback: F,
-    ) -> Result<()>
+    pub fn simulate_data_loop<F>(self, running: Arc<AtomicBool>, mut data_callback: F) -> Result<()>
     where
         F: FnMut(SensorData) -> Result<()>,
     {
@@ -200,7 +192,7 @@ impl SerialReaderWorker {
         let mut i = 0;
         // Generate a fixed number of samples in test mode
         let max_samples = if cfg!(test) { 20 } else { u32::MAX };
-        
+
         while running.load(Ordering::SeqCst) && i < max_samples {
             // Create simulated data
             let data = SensorData {
@@ -222,13 +214,13 @@ impl SerialReaderWorker {
 
             // Increment counter and wait
             i += 1;
-            
+
             // Exit early if we've hit the max samples in test mode
             if i >= max_samples && cfg!(test) {
                 println!("Generated {} test samples, stopping simulation", i);
                 break;
             }
-            
+
             thread::sleep(StdDuration::from_millis(100));
         }
 
@@ -240,10 +232,10 @@ impl SerialReaderWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-    use std::thread;
     use crate::CompressionType;
     use crate::ParquetWriter;
+    use std::sync::mpsc;
+    use std::thread;
     use tempfile::tempdir;
 
     #[test]
@@ -264,17 +256,18 @@ mod tests {
             &dir_path,
             "test_log",
             CompressionType::Snappy,
-            10,  // Small buffer size to ensure writes happen
-        ).unwrap();
+            10, // Small buffer size to ensure writes happen
+        )
+        .unwrap();
 
         // Create and start FileWriterWorker in a separate thread
         let worker = FileWriterWorker::new(
             writer,
-            0,  // No file splitting
+            0, // No file splitting
             dir_path.clone(),
             "test_log".to_string(),
         );
-        
+
         let writer_handle = thread::spawn(move || {
             worker.process_data_loop(rx, running_clone).unwrap();
         });
@@ -300,10 +293,10 @@ mod tests {
 
         // Signal the worker to stop
         running.store(false, Ordering::SeqCst);
-        
+
         // Drop sender to close the channel
         drop(tx);
-        
+
         // Wait for the worker thread to finish
         writer_handle.join().unwrap();
 
@@ -312,7 +305,10 @@ mod tests {
         let parquet_files: Vec<_> = entries
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry.path().extension().map_or(false, |ext| ext == "parquet")
+                entry
+                    .path()
+                    .extension()
+                    .map_or(false, |ext| ext == "parquet")
             })
             .collect();
 
@@ -338,32 +334,34 @@ mod tests {
             &dir_path,
             "test_integrated",
             CompressionType::Snappy,
-            10,  // Small buffer size to ensure writes happen
-        ).unwrap();
+            10, // Small buffer size to ensure writes happen
+        )
+        .unwrap();
 
         // Create and start FileWriterWorker in a separate thread
         let writer_worker = FileWriterWorker::new(
             writer,
-            0,  // No file splitting
+            0, // No file splitting
             dir_path.clone(),
             "test_integrated".to_string(),
         );
-        
+
         let writer_handle = thread::spawn(move || {
             writer_worker.process_data_loop(rx, running_clone1).unwrap();
         });
 
         // Create and start SerialReaderWorker (simulation mode) in a separate thread
-        let reader_worker = SerialReaderWorker::new(
-            "test_port".to_string(),
-            115200,
-        );
-        
+        let reader_worker = SerialReaderWorker::new("test_port".to_string(), 115200);
+
         let reader_handle = thread::spawn(move || {
             let tx_clone = tx;
-            reader_worker.simulate_data_loop(running_clone2, move |data| {
-                tx_clone.send(data).map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
-            }).unwrap();
+            reader_worker
+                .simulate_data_loop(running_clone2, move |data| {
+                    tx_clone
+                        .send(data)
+                        .map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
+                })
+                .unwrap();
         });
 
         // Let the threads run for a short time
@@ -371,7 +369,7 @@ mod tests {
 
         // Signal the workers to stop
         running.store(false, Ordering::SeqCst);
-        
+
         // Wait for the threads to finish
         reader_handle.join().unwrap();
         writer_handle.join().unwrap();
@@ -381,7 +379,10 @@ mod tests {
         let parquet_files: Vec<_> = entries
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry.path().extension().map_or(false, |ext| ext == "parquet")
+                entry
+                    .path()
+                    .extension()
+                    .map_or(false, |ext| ext == "parquet")
             })
             .collect();
 

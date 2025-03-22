@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use arrow::array::{Float32Array, Int64Array};
-use arrow::record_batch::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use parquet::basic::Compression;
-use std::fs::{File, create_dir_all};
+use parquet::file::properties::WriterProperties;
+use std::fs::{create_dir_all, File};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use super::error::ReceiverError;
 use super::types::{CompressionType, SensorData};
 
 /// Writer for saving sensor data to Parquet files
-/// 
+///
 /// This struct handles the conversion of sensor data to the Arrow format
 /// and writes it to Parquet files. It supports various compression formats,
 /// file rotation, and buffered writing for improved performance.
@@ -114,11 +114,11 @@ impl ParquetWriter {
     /// Result indicating success or error
     pub fn add_data(&mut self, data: SensorData) -> Result<()> {
         self.buffer.push(data);
-        
+
         if self.buffer.len() >= self.buffer_size {
             self.flush()?;
         }
-        
+
         Ok(())
     }
 
@@ -136,24 +136,30 @@ impl ParquetWriter {
 
         // Create the RecordBatch from buffered data
         let batch = self._create_record_batch()?;
-        
+
         // Write the batch to the Parquet file
         if let Some(writer) = &mut self.writer {
-            writer.write(&batch)
+            writer
+                .write(&batch)
                 .with_context(|| format!("Failed to write data to {}", self.output_path))?;
-            
-            println!("Wrote {} records to {}", self.buffer.len(), self.output_path);
+
+            println!(
+                "Wrote {} records to {}",
+                self.buffer.len(),
+                self.output_path
+            );
         } else {
-            return Err(ReceiverError::ParquetError(
-                "Writer is not initialized".to_string()).into());
+            return Err(
+                ReceiverError::ParquetError("Writer is not initialized".to_string()).into(),
+            );
         }
-        
+
         // Clear the buffer
         self.buffer.clear();
-        
+
         Ok(())
     }
-    
+
     /// Creates a new file (for file splitting)
     ///
     /// Closes the current file after flushing any remaining data,
@@ -168,27 +174,28 @@ impl ParquetWriter {
     pub fn rotate_file(&mut self, output_dir: &str, prefix: &str) -> Result<()> {
         // Flush any remaining data
         self.flush()?;
-        
+
         // Close the current writer by taking it and dropping it
         if let Some(writer) = self.writer.take() {
-            writer.close()
-                .with_context(|| format!("Failed to close Parquet writer for {}", self.output_path))?;
+            writer.close().with_context(|| {
+                format!("Failed to close Parquet writer for {}", self.output_path)
+            })?;
         }
-        
+
         // Ensure output directory exists
         create_dir_all(output_dir)
             .with_context(|| format!("Failed to create output directory: {}", output_dir))?;
-            
+
         // Generate new output file path
         let now = chrono::Utc::now();
         let filename = format!("{}_{}.parquet", prefix, now.format("%Y%m%d_%H%M%S"));
         let output_path = Path::new(output_dir).join(filename);
         self.output_path = output_path.to_string_lossy().to_string();
-        
+
         // Create a new Parquet writer
         let file = File::create(&output_path)
             .with_context(|| format!("Failed to create file: {}", self.output_path))?;
-            
+
         // Convert compression type to Parquet compression and build properties
         let props = match self.compression {
             CompressionType::None => WriterProperties::builder()
@@ -207,57 +214,47 @@ impl ParquetWriter {
                 .set_compression(Compression::ZSTD(Default::default()))
                 .build(),
         };
-            
+
         // Initialize the ArrowWriter
         let writer = ArrowWriter::try_new(file, self.schema.clone(), Some(props))
             .with_context(|| format!("Failed to create Parquet writer for {}", self.output_path))?;
-            
+
         self.writer = Some(writer);
-        
+
         println!("Rotated to new file: {}", self.output_path);
-        
+
         Ok(())
     }
 
     // Convert buffer data to Arrow RecordBatch (for actual file writing)
     fn _create_record_batch(&self) -> Result<RecordBatch> {
         // Extract data into columns
-        let timestamps: Int64Array = self.buffer.iter()
+        let timestamps: Int64Array = self
+            .buffer
+            .iter()
             .map(|data| data.timestamp as i64)
             .collect();
-        
-        let temps: Float32Array = self.buffer.iter()
-            .map(|data| data.temp)
-            .collect();
-        
-        let gxs: Float32Array = self.buffer.iter()
-            .map(|data| data.gx)
-            .collect();
-        
-        let gys: Float32Array = self.buffer.iter()
-            .map(|data| data.gy)
-            .collect();
-        
-        let gzs: Float32Array = self.buffer.iter()
-            .map(|data| data.gz)
-            .collect();
-        
-        let axs: Float32Array = self.buffer.iter()
-            .map(|data| data.ax)
-            .collect();
-        
-        let ays: Float32Array = self.buffer.iter()
-            .map(|data| data.ay)
-            .collect();
-        
-        let azs: Float32Array = self.buffer.iter()
-            .map(|data| data.az)
-            .collect();
-        
-        let system_timestamps: Int64Array = self.buffer.iter()
+
+        let temps: Float32Array = self.buffer.iter().map(|data| data.temp).collect();
+
+        let gxs: Float32Array = self.buffer.iter().map(|data| data.gx).collect();
+
+        let gys: Float32Array = self.buffer.iter().map(|data| data.gy).collect();
+
+        let gzs: Float32Array = self.buffer.iter().map(|data| data.gz).collect();
+
+        let axs: Float32Array = self.buffer.iter().map(|data| data.ax).collect();
+
+        let ays: Float32Array = self.buffer.iter().map(|data| data.ay).collect();
+
+        let azs: Float32Array = self.buffer.iter().map(|data| data.az).collect();
+
+        let system_timestamps: Int64Array = self
+            .buffer
+            .iter()
             .map(|data| data.system_timestamp)
             .collect();
-        
+
         // Create record batch
         RecordBatch::try_new(
             self.schema.clone(),
@@ -275,7 +272,7 @@ impl ParquetWriter {
         )
         .with_context(|| "Failed to create record batch")
     }
-    
+
     /// Close the writer and finalize the file
     ///
     /// Flushes any remaining data and properly closes the Parquet file.
@@ -286,14 +283,15 @@ impl ParquetWriter {
     pub fn close(mut self) -> Result<()> {
         // Flush any remaining data
         self.flush()?;
-        
+
         // Close the writer
         if let Some(writer) = self.writer.take() {
-            writer.close()
-                .with_context(|| format!("Failed to close Parquet writer for {}", self.output_path))?;
+            writer.close().with_context(|| {
+                format!("Failed to close Parquet writer for {}", self.output_path)
+            })?;
             println!("Closed Parquet file: {}", self.output_path);
         }
-        
+
         Ok(())
     }
 }

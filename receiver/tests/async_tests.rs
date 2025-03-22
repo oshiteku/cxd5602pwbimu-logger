@@ -8,9 +8,7 @@ use tempfile::tempdir;
 
 // Import crate from the lib
 extern crate receiver;
-use receiver::{
-    CompressionType, FileWriterWorker, ParquetWriter, SerialReaderWorker, SensorData,
-};
+use receiver::{CompressionType, FileWriterWorker, ParquetWriter, SensorData, SerialReaderWorker};
 
 #[test]
 fn test_end_to_end_async_processing() -> Result<()> {
@@ -43,10 +41,7 @@ fn test_end_to_end_async_processing() -> Result<()> {
     );
 
     // Create serial reader worker in simulation mode
-    let serial_reader = SerialReaderWorker::new(
-        "test_port".to_string(),
-        115200,
-    );
+    let serial_reader = SerialReaderWorker::new("test_port".to_string(), 115200);
 
     // Start file writer thread
     let writer_handle = thread::spawn(move || {
@@ -81,7 +76,12 @@ fn test_end_to_end_async_processing() -> Result<()> {
     let entries = std::fs::read_dir(&dir_path)?;
     let parquet_files: Vec<_> = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "parquet"))
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map_or(false, |ext| ext == "parquet")
+        })
         .collect();
 
     assert!(!parquet_files.is_empty(), "No Parquet files were created");
@@ -155,7 +155,12 @@ fn test_file_rotation() -> Result<()> {
     let entries = std::fs::read_dir(&dir_path)?;
     let parquet_files: Vec<_> = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "parquet"))
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map_or(false, |ext| ext == "parquet")
+        })
         .collect();
 
     assert!(!parquet_files.is_empty(), "No Parquet files were created");
