@@ -1,7 +1,8 @@
 /****************************************************************************
- * examples/cxd5602pwbimu/cxd5602pwbimu_logger_main.c
+ * cxd5602pwbimu-logger.ino
  *
  *   Copyright 2025 Sony Semiconductor Solutions Corporation
+ *   Copyright 2025 oshiteku
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -45,9 +46,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <nuttx/sensors/cxd5602pwbimu.h>
-
-#include "log_server.h"
-#include "server_conf.h"
+#include <arch/board/cxd56_cxd5602pwbimu.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -159,36 +158,10 @@ static int drop_50msdata(int fd, int samprate, int nfifo)
   return 0;
 }
 
-static int log2net(cxd5602pwbimu_data_t *dat, int num, void *arg)
-{
-  return logsvr_sendimudata(dat, num);
-}
-
 static int log2filebin(cxd5602pwbimu_data_t *dat, int num, void *arg)
 {
   FILE *fp = (FILE *)arg;
   fwrite(dat, sizeof(dat[0]), num, fp);
-  return 0;
-}
-
-static int log2filetxt(cxd5602pwbimu_data_t *dat, int num, void *arg)
-{
-  int i;
-  FILE *fp = (FILE *)arg;
-  for (i = 0; i < num; i++)
-    {
-      fprintf(fp, "%08x,%08x,%08x,%08x,"
-                  "%08x,%08x,%08x,%08x\n",
-                  (unsigned int)dat[i].timestamp,
-                  ((conv_f2u_t)dat[i].temp).u,
-                  ((conv_f2u_t)dat[i].gx).u,
-                  ((conv_f2u_t)dat[i].gy).u,
-                  ((conv_f2u_t)dat[i].gz).u,
-                  ((conv_f2u_t)dat[i].ax).u,
-                  ((conv_f2u_t)dat[i].ay).u,
-                  ((conv_f2u_t)dat[i].az).u);
-    }
-
   return 0;
 }
 
@@ -199,14 +172,14 @@ static int log2uart(cxd5602pwbimu_data_t *dat, int num, void *arg)
     {
       printf("%08x,%08x,%08x,%08x,"
              "%08x,%08x,%08x,%08x\n",
-             (unsigned int)dat[i].timestamp,
-             ((conv_f2u_t)dat[i].temp).u,
-             ((conv_f2u_t)dat[i].gx).u,
-             ((conv_f2u_t)dat[i].gy).u,
-             ((conv_f2u_t)dat[i].gz).u,
-             ((conv_f2u_t)dat[i].ax).u,
-             ((conv_f2u_t)dat[i].ay).u,
-             ((conv_f2u_t)dat[i].az).u);
+             dat[i].timestamp,
+             *reinterpret_cast<uint32_t*>(&dat[i].temp),
+             *reinterpret_cast<uint32_t*>(&dat[i].gx),
+             *reinterpret_cast<uint32_t*>(&dat[i].gy),
+             *reinterpret_cast<uint32_t*>(&dat[i].gz),
+             *reinterpret_cast<uint32_t*>(&dat[i].ax),
+             *reinterpret_cast<uint32_t*>(&dat[i].ay),
+             *reinterpret_cast<uint32_t*>(&dat[i].az));
     }
 
   return 0;
@@ -276,10 +249,10 @@ static void print_help(void)
 }
 
 /****************************************************************************
- * Public Functions
+ * Main Functions
  ****************************************************************************/
 
-int main(int argc, FAR char * const argv[])
+void setup()
 {
   int ret = 0;
   int opt;
@@ -294,77 +267,17 @@ int main(int argc, FAR char * const argv[])
   logfunc_t logfunc;
   void *logopt = NULL;
 
-  /* Command line argument check */
+  // Use UART for logging
+  logfunc = log2uart;
 
-  while ((opt = getopt(argc, argv, "s:a:g:f:o:dh")) >= 0)
+  // Initialize IMU
+  // Reference: https://qiita.com/SaChiKaKK/items/50c550782b13fe43061e
+  ret = board_cxd5602pwbimu_initialize(5);
+  if (ret < 0)
     {
-      switch (opt)
-        {
-          case 's': samprate = atoi(optarg); break;
-          case 'a': arange   = atoi(optarg); break;
-          case 'g': grange   = atoi(optarg); break;
-          case 'f': fifo     = atoi(optarg); break;
-          case 'o': outdev   = optarg;       break;
-          case 'd': disp     = 1;            break;
-          case 'h':
-          default: print_help();             return -1;
-        }
-    }
-
-  /* Output device handling.
-   * Supporting format:
-   *  Save in file as binary  /path/to/file.bin
-   *  Save in file as text    /path/to/file.txt
-   *  Send data to UART       uart
-   *  Send data to net        net
-   */
-
-  if (outdev[0] == '/')
-    {
-      int len = strlen(outdev);
-      if (!strncmp(&outdev[len - 3], "bin", 4))
-        {
-          logfunc = log2filebin;
-        }
-      else if (!strncmp(&outdev[len - 3], "txt", 4))
-        {
-          logfunc = log2filetxt;
-        }
-      else
-        {
-          printf("File type is not supported : %s\n", outdev);
-          printf("     Supported file .bin or .txt\n");
-          return -1;
-        }
-
-      fp = fopen(outdev, "w");
-      if (fp == NULL)
-        {
-          printf("Could not open:%s\n", outdev);
-          return -1;
-        }
-      logopt = (void *)fp;
-    }
-  else if (!strncmp(outdev, "uart", 5))
-    {
-      logfunc = log2uart;
-    }
-  else if (!strncmp(outdev, "net", 4))
-    {
-      if (logsvr_initserver(SERVER_PORT_NUM) >= 0)
-        {
-          logfunc = log2net;
-        }
-      else
-        {
-          printf("Log Server could not start...\n");
-          return -1;
-        }
-    }
-  else
-    {
-      print_help();
-      return -1;
+      printf("ERROR: Failed to initialize CXD5602PWBIMU.\n");
+      ret = -1;
+      goto end_app;
     }
 
   devfd = open(CXD5602PWBIMU_DEVPATH, O_RDONLY);
@@ -398,6 +311,6 @@ int main(int argc, FAR char * const argv[])
 
 end_app:
   if (fp) fclose(fp);
-
-  return ret;
 }
+
+void loop() {}
