@@ -37,7 +37,7 @@ struct Cli {
     #[arg(short, long, default_value = "snappy")]
     compression: String,
 
-    /// Buffer size (how many records to accumulate before sending)
+    /// Buffer size (how many records to accumulate before writing)
     #[arg(short = 'u', long, default_value = "100")]
     buffer_size: usize,
 
@@ -86,7 +86,7 @@ fn run() -> Result<()> {
     let (tx, rx) = mpsc::channel();
 
     // Create parquet writer
-    let writer = ParquetWriter::new(&cli.output_dir, &cli.prefix, compression, 1)?; // バッファサイズは1に設定（tx側でバッファリング）
+    let writer = ParquetWriter::new(&cli.output_dir, &cli.prefix, compression, cli.buffer_size)?;
 
     // Create file writer worker
     let file_writer = FileWriterWorker::new(
@@ -96,8 +96,8 @@ fn run() -> Result<()> {
         cli.prefix.clone(),
     );
 
-    // Create serial reader worker with buffer size
-    let serial_reader = SerialReaderWorker::new(cli.port.clone(), cli.baud_rate, cli.buffer_size);
+    // Create serial reader worker
+    let serial_reader = SerialReaderWorker::new(cli.port.clone(), cli.baud_rate);
 
     // Start file writer thread
     let running_writer = running.clone();
@@ -112,10 +112,16 @@ fn run() -> Result<()> {
     let reader_handle = thread::spawn(move || {
         let result = if cli.simulation {
             // Run in simulation mode
-            serial_reader.simulate_data_loop(running_reader, tx)
+            serial_reader.simulate_data_loop(running_reader, move |data| {
+                tx.send(data)
+                    .map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
+            })
         } else {
             // Run with real serial port
-            serial_reader.read_serial_loop(running_reader, tx)
+            serial_reader.read_serial_loop(running_reader, move |data| {
+                tx.send(data)
+                    .map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
+            })
         };
 
         if let Err(e) = result {
