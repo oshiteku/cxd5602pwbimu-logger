@@ -1,7 +1,7 @@
 [package]
 name = "receiver"
 version = "0.1.0"
-edition = "2021"  # Rust 2024 is not released yet, changing to 2021
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
@@ -9,7 +9,7 @@ thiserror = "1.0"
 serialport = "4.2"
 parquet = "47.0"
 arrow = "47.0"
-chrono = "=0.4.31"
+chrono = "0.4.31"
 clap = { version = "4.4", features = ["derive"] }
 ctrlc = "3.4"
 

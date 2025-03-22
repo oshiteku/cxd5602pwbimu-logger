@@ -11,6 +11,9 @@ use super::SensorData;
 use super::serial::{open_serial_port, parse_sensor_data, read_serial_data};
 
 /// Worker for handling file writing in a separate thread
+/// 
+/// This struct is responsible for writing sensor data to Parquet files,
+/// handling file rotation, and managing the background file writing operations.
 pub struct FileWriterWorker {
     writer: ParquetWriter,
     split_minutes: u32,
@@ -20,6 +23,16 @@ pub struct FileWriterWorker {
 }
 
 impl FileWriterWorker {
+    /// Creates a new file writer worker
+    ///
+    /// # Arguments
+    /// * `writer` - The configured Parquet writer
+    /// * `split_minutes` - Interval in minutes for file rotation (0 = no splitting)
+    /// * `output_dir` - Directory to store Parquet files
+    /// * `prefix` - Filename prefix for Parquet files
+    ///
+    /// # Returns
+    /// A new FileWriterWorker instance
     pub fn new(
         writer: ParquetWriter,
         split_minutes: u32,
@@ -47,6 +60,16 @@ impl FileWriterWorker {
     }
 
     /// Process incoming sensor data and write it to a Parquet file
+    ///
+    /// Runs in a loop until signaled to stop. Handles file rotation based on time
+    /// intervals and writes incoming data to Parquet files.
+    ///
+    /// # Arguments
+    /// * `rx` - Receiver channel for incoming sensor data
+    /// * `running` - Atomic flag indicating whether the process should continue running
+    ///
+    /// # Returns
+    /// Result indicating success or error
     pub fn process_data_loop(
         mut self,
         rx: Receiver<SensorData>,
@@ -90,12 +113,24 @@ impl FileWriterWorker {
 }
 
 /// Worker for reading serial data in a separate thread
+/// 
+/// This struct is responsible for reading data from the serial port,
+/// parsing it into sensor data structures, and sending that data to the
+/// file writer thread. It also provides a simulation mode for testing.
 pub struct SerialReaderWorker {
     port_name: String,
     baud_rate: u32,
 }
 
 impl SerialReaderWorker {
+    /// Creates a new serial reader worker
+    ///
+    /// # Arguments
+    /// * `port_name` - Name of the serial port to read from
+    /// * `baud_rate` - Baud rate for the serial connection
+    ///
+    /// # Returns
+    /// A new SerialReaderWorker instance
     pub fn new(port_name: String, baud_rate: u32) -> Self {
         SerialReaderWorker {
             port_name,

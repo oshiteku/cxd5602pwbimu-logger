@@ -20,7 +20,7 @@ fn test_cli_missing_required_arg() {
 #[test]
 fn test_cli_invalid_compression() {
     let mut cmd = Command::cargo_bin("receiver").unwrap();
-    cmd.args(&["-p", "dummy_port", "-c", "invalid"]);
+    cmd.args(&["-p", "dummy_port", "-c", "invalid", "-m"]);
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("Invalid compression algorithm"));

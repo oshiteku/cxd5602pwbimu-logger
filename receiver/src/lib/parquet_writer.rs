@@ -12,6 +12,11 @@ use std::sync::Arc;
 use super::error::ReceiverError;
 use super::types::{CompressionType, SensorData};
 
+/// Writer for saving sensor data to Parquet files
+/// 
+/// This struct handles the conversion of sensor data to the Arrow format
+/// and writes it to Parquet files. It supports various compression formats,
+/// file rotation, and buffered writing for improved performance.
 pub struct ParquetWriter {
     schema: Arc<Schema>,
     compression: CompressionType,
@@ -22,6 +27,16 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
+    /// Creates a new Parquet writer
+    ///
+    /// # Arguments
+    /// * `output_dir` - Directory where Parquet files will be saved
+    /// * `prefix` - Filename prefix for Parquet files
+    /// * `compression` - Compression type to use
+    /// * `buffer_size` - Number of records to buffer before writing
+    ///
+    /// # Returns
+    /// A new ParquetWriter configured with the specified parameters
     pub fn new(
         output_dir: &str,
         prefix: &str,
@@ -88,6 +103,15 @@ impl ParquetWriter {
         })
     }
 
+    /// Adds a single sensor data record to the buffer
+    ///
+    /// Automatically flushes the buffer to disk when it reaches the configured buffer size
+    ///
+    /// # Arguments
+    /// * `data` - The sensor data to add
+    ///
+    /// # Returns
+    /// Result indicating success or error
     pub fn add_data(&mut self, data: SensorData) -> Result<()> {
         self.buffer.push(data);
         
@@ -98,6 +122,13 @@ impl ParquetWriter {
         Ok(())
     }
 
+    /// Flushes buffered data to the Parquet file
+    ///
+    /// Writes any data in the buffer to the Parquet file.
+    /// No-op if buffer is empty.
+    ///
+    /// # Returns
+    /// Result indicating success or error
     pub fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -123,7 +154,17 @@ impl ParquetWriter {
         Ok(())
     }
     
-    // Creates a new file (for file splitting)
+    /// Creates a new file (for file splitting)
+    ///
+    /// Closes the current file after flushing any remaining data,
+    /// then creates a new file with the current timestamp.
+    ///
+    /// # Arguments
+    /// * `output_dir` - Directory to store the new file
+    /// * `prefix` - Filename prefix for the new file
+    ///
+    /// # Returns
+    /// Result indicating success or error
     pub fn rotate_file(&mut self, output_dir: &str, prefix: &str) -> Result<()> {
         // Flush any remaining data
         self.flush()?;
@@ -235,7 +276,13 @@ impl ParquetWriter {
         .with_context(|| "Failed to create record batch")
     }
     
-    // Close the writer and finalize the file
+    /// Close the writer and finalize the file
+    ///
+    /// Flushes any remaining data and properly closes the Parquet file.
+    /// This should be called when finished with the writer to ensure all data is saved.
+    ///
+    /// # Returns
+    /// Result indicating success or error
     pub fn close(mut self) -> Result<()> {
         // Flush any remaining data
         self.flush()?;
