@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -164,7 +164,7 @@ impl SerialReaderWorker {
 
         let mut i = 0;
         // Generate a fixed number of samples in test mode
-        let max_samples = if cfg!(test) { 20 } else { std::u32::MAX };
+        let max_samples = if cfg!(test) { 20 } else { u32::MAX };
         
         while running.load(Ordering::SeqCst) && i < max_samples {
             // Create simulated data

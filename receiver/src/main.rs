@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 
 use receiver::{
-    CompressionType, FileWriterWorker, ParquetWriter, SerialReaderWorker, SensorData,
+    CompressionType, FileWriterWorker, ParquetWriter, SerialReaderWorker,
 };
 
 #[derive(Parser, Debug)]
