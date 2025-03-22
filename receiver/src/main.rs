@@ -2,10 +2,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
 
-mod lib;
-use lib::{CompressionType, ParquetWriter, SensorData};
+use receiver::{
+    CompressionType, FileWriterWorker, ParquetWriter, SerialReaderWorker, SensorData,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "receiver")]
@@ -39,6 +42,10 @@ struct Cli {
     /// Buffer size (how many records to accumulate before writing)
     #[arg(short = 'u', long, default_value = "100")]
     buffer_size: usize,
+    
+    /// Enable simulation mode (generate test data instead of reading from serial port)
+    #[arg(short = 'm', long)]
+    simulation: bool,
 }
 
 fn run() -> Result<()> {
@@ -65,6 +72,7 @@ fn run() -> Result<()> {
     println!("  File prefix: {}", cli.prefix);
     println!("  Compression: {}", cli.compression);
     println!("  Buffer size: {}", cli.buffer_size);
+    println!("  Simulation mode: {}", cli.simulation);
     
     // Set up ctrl-c handler
     let running = Arc::new(AtomicBool::new(true));
@@ -76,45 +84,62 @@ fn run() -> Result<()> {
     })
     .with_context(|| "Error setting Ctrl-C handler")?;
     
+    // Create a channel for communication between threads
+    let (tx, rx) = mpsc::channel();
+    
     // Create parquet writer
-    let mut writer = ParquetWriter::new(
+    let writer = ParquetWriter::new(
         &cli.output_dir,
         &cli.prefix,
         compression,
         cli.buffer_size,
     )?;
     
-    // TODO: In a real implementation, open the serial port and read data
+    // Create file writer worker
+    let file_writer = FileWriterWorker::new(
+        writer,
+        cli.split_minutes,
+        cli.output_dir.clone(),
+        cli.prefix.clone(),
+    );
     
-    // For demonstration, we'll just simulate receiving a few records and exit
-    println!("Simulating data reception for demo purposes...");
+    // Create serial reader worker
+    let serial_reader = SerialReaderWorker::new(
+        cli.port.clone(),
+        cli.baud_rate,
+    );
     
-    for i in 0..10 {
-        // Simulate receiving data
-        let data = SensorData {
-            timestamp: i,
-            temp: 25.0 + (i as f32 * 0.1),
-            gx: 0.1 * i as f32,
-            gy: 0.2 * i as f32,
-            gz: 0.3 * i as f32,
-            ax: 1.0 * i as f32,
-            ay: 1.1 * i as f32,
-            az: 1.2 * i as f32,
-            system_timestamp: chrono::Utc::now().timestamp_millis(),
+    // Start file writer thread
+    let running_writer = running.clone();
+    let writer_handle = thread::spawn(move || {
+        if let Err(e) = file_writer.process_data_loop(rx, running_writer) {
+            eprintln!("Error in file writer thread: {}", e);
+        }
+    });
+    
+    // Start serial reader thread
+    let running_reader = running.clone();
+    let reader_handle = thread::spawn(move || {
+        let result = if cli.simulation {
+            // Run in simulation mode
+            serial_reader.simulate_data_loop(running_reader, move |data| {
+                tx.send(data).map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
+            })
+        } else {
+            // Run with real serial port
+            serial_reader.read_serial_loop(running_reader, move |data| {
+                tx.send(data).map_err(|e| anyhow::anyhow!("Channel send error: {}", e))
+            })
         };
         
-        writer.add_data(data)?;
-        
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        
-        // Check if we should exit
-        if !running.load(Ordering::SeqCst) {
-            break;
+        if let Err(e) = result {
+            eprintln!("Error in serial reader thread: {}", e);
         }
-    }
+    });
     
-    // Close the writer to ensure all data is flushed and the file is finalized
-    writer.close()?;
+    // Wait for threads to complete
+    reader_handle.join().expect("Serial reader thread panicked");
+    writer_handle.join().expect("File writer thread panicked");
     
     println!("Receiver shutdown complete");
     
