@@ -5,11 +5,12 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use super::error::ReceiverError;
-use super::types::SensorData;
+use super::types::{DataFormat, SensorData};
 
 // Buffer to hold incomplete lines between reads
 thread_local! {
     static LINE_BUFFER: RefCell<String> = RefCell::new(String::with_capacity(4096));
+    static BINARY_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
 }
 
 /// Opens a serial port with the specified settings
@@ -92,7 +93,112 @@ pub fn parse_sensor_data(line: &str) -> Result<SensorData> {
     })
 }
 
-/// Read all available sensor data lines from a serial port
+/// Calculate a simple 8-bit CRC
+fn calculate_crc8(data: &[u8]) -> u8 {
+    let mut crc: u8 = 0;
+    for &byte in data {
+        crc = crc.wrapping_add(byte);
+    }
+    crc
+}
+
+/// Parse binary sensor data
+///
+/// Format: [Frame ID(2B)][timestamp(4B)][temp(4B)][gx(4B)][gy(4B)][gz(4B)][ax(4B)][ay(4B)][az(4B)][CRC(1B)]
+/// Frame ID: 0xAA55
+pub fn parse_binary_sensor_data(buffer: &[u8], start_index: usize) -> Result<(SensorData, usize)> {
+    // Minimum bytes required (header 2B + data 32B + CRC 1B = 35B)
+    if buffer.len() < start_index + 35 {
+        return Err(ReceiverError::ParseError("Incomplete data frame".to_string()).into());
+    }
+
+    // Check frame header
+    if buffer[start_index] != 0xAA || buffer[start_index + 1] != 0x55 {
+        return Err(ReceiverError::ParseError("Invalid frame header".to_string()).into());
+    }
+
+    // Extract data (little endian)
+    let timestamp = u32::from_le_bytes([
+        buffer[start_index + 2],
+        buffer[start_index + 3],
+        buffer[start_index + 4],
+        buffer[start_index + 5],
+    ]);
+
+    let temp = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 6],
+        buffer[start_index + 7],
+        buffer[start_index + 8],
+        buffer[start_index + 9],
+    ]));
+
+    let gx = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 10],
+        buffer[start_index + 11],
+        buffer[start_index + 12],
+        buffer[start_index + 13],
+    ]));
+
+    let gy = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 14],
+        buffer[start_index + 15],
+        buffer[start_index + 16],
+        buffer[start_index + 17],
+    ]));
+
+    let gz = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 18],
+        buffer[start_index + 19],
+        buffer[start_index + 20],
+        buffer[start_index + 21],
+    ]));
+
+    let ax = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 22],
+        buffer[start_index + 23],
+        buffer[start_index + 24],
+        buffer[start_index + 25],
+    ]));
+
+    let ay = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 26],
+        buffer[start_index + 27],
+        buffer[start_index + 28],
+        buffer[start_index + 29],
+    ]));
+
+    let az = f32::from_bits(u32::from_le_bytes([
+        buffer[start_index + 30],
+        buffer[start_index + 31],
+        buffer[start_index + 32],
+        buffer[start_index + 33],
+    ]));
+
+    // Verify CRC
+    let calculated_crc = calculate_crc8(&buffer[start_index + 2..start_index + 34]);
+    if calculated_crc != buffer[start_index + 34] {
+        return Err(ReceiverError::ParseError("CRC check failed".to_string()).into());
+    }
+
+    let system_ts = Utc::now().timestamp_millis();
+
+    Ok((
+        SensorData {
+            timestamp,
+            temp,
+            gx,
+            gy,
+            gz,
+            ax,
+            ay,
+            az,
+            system_timestamp: system_ts,
+        },
+        start_index + 35,
+    )) // Return next frame position
+}
+
+/// Read all available sensor data lines from a serial port (text format)
 ///
 /// This improved version uses a fixed buffer to read multiple bytes at once
 /// and maintains state between calls to handle incomplete lines.
@@ -144,6 +250,145 @@ pub fn read_serial_data(port: &mut Box<dyn SerialPort>) -> Result<Vec<String>> {
 
         Ok(complete_lines)
     })
+}
+
+/// Read binary sensor data from serial port
+///
+/// Reads and processes binary format data, extracting complete frames
+pub fn read_binary_sensor_data(port: &mut Box<dyn SerialPort>) -> Result<Vec<SensorData>> {
+    let mut buf = [0u8; 4096];
+    let mut result = Vec::new();
+
+    // Read available data into buffer
+    let n = match port.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Process with our binary buffer
+    BINARY_BUFFER.with(|buffer| {
+        let mut binary_buffer = buffer.borrow_mut();
+
+        // Append new data to existing buffer
+        binary_buffer.extend_from_slice(&buf[..n]);
+
+        // Process all complete frames in the buffer
+        let mut index = 0;
+        while index + 1 < binary_buffer.len() {
+            // Find frame start markers
+            if binary_buffer[index] == 0xAA && binary_buffer[index + 1] == 0x55 {
+                match parse_binary_sensor_data(&binary_buffer, index) {
+                    Ok((data, next_index)) => {
+                        result.push(data);
+                        index = next_index;
+                    }
+                    Err(_) => {
+                        // Parsing error, try next byte
+                        index += 1;
+                    }
+                }
+            } else {
+                // Not a frame start, move to next byte
+                index += 1;
+            }
+        }
+
+        // Remove processed data
+        if index > 0 {
+            binary_buffer.drain(0..index);
+        }
+
+        Ok(result)
+    })
+}
+
+/// Auto-detect data format and read accordingly
+pub fn read_auto_detect_data(
+    port: &mut Box<dyn SerialPort>,
+    format: &mut DataFormat,
+) -> Result<Vec<SensorData>> {
+    let mut buf = [0u8; 16]; // Peek buffer to detect format
+    let mut result = Vec::new();
+
+    // Peek at data
+    let n = match port.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+
+    if n < 2 {
+        return Ok(Vec::new());
+    }
+
+    // Detect format:
+    // - If buffer starts with 0xAA55, it's likely binary format
+    // - If buffer contains ASCII hex characters and commas, it's likely text format
+    if buf[0] == 0xAA && buf[1] == 0x55 {
+        *format = DataFormat::Binary;
+    } else if buf
+        .iter()
+        .take(n)
+        .all(|&b| b.is_ascii_hexdigit() || b == b',' || b == b'\r' || b == b'\n')
+    {
+        *format = DataFormat::Text;
+    }
+
+    // Don't actually consume the bytes, just put them back in the buffer
+    // by modifying the state of the binary/text buffers
+    match *format {
+        DataFormat::Binary => {
+            BINARY_BUFFER.with(|buffer| {
+                let mut binary_buffer = buffer.borrow_mut();
+                binary_buffer.extend_from_slice(&buf[..n]);
+            });
+
+            // Read the rest of the data using the binary reader
+            let mut read_result = read_binary_sensor_data(port)?;
+            result.append(&mut read_result);
+        }
+        DataFormat::Text => {
+            let data = String::from_utf8_lossy(&buf[..n]).to_string();
+            LINE_BUFFER.with(|buffer| {
+                let mut line_buffer = buffer.borrow_mut();
+                line_buffer.push_str(&data);
+            });
+
+            // Read the rest of the data using the text reader
+            let lines = read_serial_data(port)?;
+            for line in lines {
+                match parse_sensor_data(&line) {
+                    Ok(data) => result.push(data),
+                    Err(e) => eprintln!("Error parsing sensor data: {}", e),
+                }
+            }
+        }
+        DataFormat::Auto => {
+            // Default to text format if we're still undecided
+            *format = DataFormat::Text;
+            let data = String::from_utf8_lossy(&buf[..n]).to_string();
+            LINE_BUFFER.with(|buffer| {
+                let mut line_buffer = buffer.borrow_mut();
+                line_buffer.push_str(&data);
+            });
+
+            // Read the rest of the data using the text reader
+            let lines = read_serial_data(port)?;
+            for line in lines {
+                match parse_sensor_data(&line) {
+                    Ok(data) => result.push(data),
+                    Err(e) => eprintln!("Error parsing sensor data: {}", e),
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -461,5 +706,136 @@ mod tests {
             (result.az - (-0.0)).abs() < f32::EPSILON,
             "80000000 should be -0.0"
         );
+    }
+
+    #[test]
+    fn test_binary_frame_parsing() {
+        // Create a mock binary frame
+        let mut frame = Vec::new();
+
+        // Frame header: 0xAA55
+        frame.push(0xAA);
+        frame.push(0x55);
+
+        // Timestamp: 123 (0x7B)
+        frame.extend_from_slice(&[0x7B, 0x00, 0x00, 0x00]); // little endian
+
+        // Temperature: 10.0f32 (0x41200000) in little endian
+        frame.extend_from_slice(&[0x00, 0x00, 0x20, 0x41]);
+
+        // Gyro X: 1.0f32 (0x3F800000)
+        frame.extend_from_slice(&[0x00, 0x00, 0x80, 0x3F]);
+
+        // Gyro Y: 2.0f32 (0x40000000)
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x40]);
+
+        // Gyro Z: 3.0f32 (0x40400000)
+        frame.extend_from_slice(&[0x00, 0x00, 0x40, 0x40]);
+
+        // Accel X: -1.0f32 (0xBF800000)
+        frame.extend_from_slice(&[0x00, 0x00, 0x80, 0xBF]);
+
+        // Accel Y: -2.0f32 (0xC0000000)
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0xC0]);
+
+        // Accel Z: -3.0f32 (0xC0400000)
+        frame.extend_from_slice(&[0x00, 0x00, 0x40, 0xC0]);
+
+        // Calculate CRC (sum of all data bytes)
+        let crc = calculate_crc8(&frame[2..34]);
+        frame.push(crc);
+
+        // Parse the binary frame
+        let (result, next_index) = parse_binary_sensor_data(&frame, 0).unwrap();
+
+        // Verify parsing results
+        assert_eq!(result.timestamp, 123);
+        assert!((result.temp - 10.0).abs() < f32::EPSILON);
+        assert!((result.gx - 1.0).abs() < f32::EPSILON);
+        assert!((result.gy - 2.0).abs() < f32::EPSILON);
+        assert!((result.gz - 3.0).abs() < f32::EPSILON);
+        assert!((result.ax - (-1.0)).abs() < f32::EPSILON);
+        assert!((result.ay - (-2.0)).abs() < f32::EPSILON);
+        assert!((result.az - (-3.0)).abs() < f32::EPSILON);
+
+        // Verify next index
+        assert_eq!(next_index, 35);
+    }
+
+    #[test]
+    fn test_binary_invalid_header() {
+        // Create a mock binary frame with invalid header
+        let mut frame = Vec::new();
+
+        // Invalid frame header: 0x1234 instead of 0xAA55
+        frame.push(0x12);
+        frame.push(0x34);
+
+        // Add some dummy data
+        for _ in 0..33 {
+            frame.push(0x00);
+        }
+
+        // Parse should fail due to invalid header
+        let result = parse_binary_sensor_data(&frame, 0);
+        assert!(result.is_err());
+
+        if let Err(e) = result {
+            assert!(format!("{}", e).contains("Invalid frame header"));
+        } else {
+            panic!("Expected error for invalid frame header");
+        }
+    }
+
+    #[test]
+    fn test_binary_invalid_crc() {
+        // Create a mock binary frame
+        let mut frame = Vec::new();
+
+        // Frame header: 0xAA55
+        frame.push(0xAA);
+        frame.push(0x55);
+
+        // Add some data
+        for i in 0..32 {
+            frame.push(i as u8);
+        }
+
+        // Add an incorrect CRC
+        frame.push(0xFF);
+
+        // Parse should fail due to invalid CRC
+        let result = parse_binary_sensor_data(&frame, 0);
+        assert!(result.is_err());
+
+        if let Err(e) = result {
+            assert!(format!("{}", e).contains("CRC check failed"));
+        } else {
+            panic!("Expected error for invalid CRC");
+        }
+    }
+
+    #[test]
+    fn test_format_auto_detection() {
+        // Test binary format detection
+        let mut binary_frame = vec![0xAA, 0x55]; // Binary frame header
+        binary_frame.extend_from_slice(&[0; 33]); // Rest of the frame
+
+        let mut port_binary = Box::new(MockSerialPort::new(&binary_frame)) as Box<dyn SerialPort>;
+        let mut format = DataFormat::Auto;
+
+        // Should detect as binary
+        let _ = read_auto_detect_data(&mut port_binary, &mut format);
+        assert_eq!(format, DataFormat::Binary);
+
+        // Test text format detection
+        let text_data =
+            b"00000123,41200000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n";
+        let mut port_text = Box::new(MockSerialPort::new(text_data)) as Box<dyn SerialPort>;
+        let mut format = DataFormat::Auto;
+
+        // Should detect as text
+        let _ = read_auto_detect_data(&mut port_text, &mut format);
+        assert_eq!(format, DataFormat::Text);
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -6,9 +6,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration as StdDuration;
 
-use super::serial::{open_serial_port, parse_sensor_data, read_serial_data};
+use super::serial::{
+    open_serial_port, parse_sensor_data, read_auto_detect_data, read_binary_sensor_data,
+    read_serial_data,
+};
+use super::types::{DataFormat, SensorData};
 use super::ParquetWriter;
-use super::SensorData;
 
 /// Worker for handling file writing in a separate thread
 ///
@@ -120,6 +123,7 @@ impl FileWriterWorker {
 pub struct SerialReaderWorker {
     port_name: String,
     baud_rate: u32,
+    data_format: DataFormat,
 }
 
 impl SerialReaderWorker {
@@ -130,11 +134,29 @@ impl SerialReaderWorker {
     /// * `baud_rate` - Baud rate for the serial connection
     ///
     /// # Returns
-    /// A new SerialReaderWorker instance
+    /// A new SerialReaderWorker instance with auto-detection of data format
     pub fn new(port_name: String, baud_rate: u32) -> Self {
         SerialReaderWorker {
             port_name,
             baud_rate,
+            data_format: DataFormat::Auto,
+        }
+    }
+
+    /// Creates a new serial reader worker with specified format
+    ///
+    /// # Arguments
+    /// * `port_name` - Name of the serial port to read from
+    /// * `baud_rate` - Baud rate for the serial connection
+    /// * `data_format` - Format of incoming data (Auto, Text, or Binary)
+    ///
+    /// # Returns
+    /// A new SerialReaderWorker instance with the specified data format
+    pub fn new_with_format(port_name: String, baud_rate: u32, data_format: DataFormat) -> Self {
+        SerialReaderWorker {
+            port_name,
+            baud_rate,
+            data_format,
         }
     }
 
@@ -143,38 +165,61 @@ impl SerialReaderWorker {
     where
         F: FnMut(SensorData) -> Result<()>,
     {
-        println!("Serial reader thread started");
+        println!(
+            "Serial reader thread started with format: {:?}",
+            self.data_format
+        );
 
         // Open the serial port
-        let mut port = open_serial_port(&self.port_name, self.baud_rate)?;
+        let mut port = open_serial_port(&self.port_name, self.baud_rate)
+            .with_context(|| format!("Failed to open serial port {}", self.port_name))?;
         let mut consecutive_errors = 0;
+        let mut format = self.data_format;
 
         while running.load(Ordering::SeqCst) {
-            // Try to read lines from the serial port
-            match read_serial_data(&mut port) {
-                Ok(lines) => {
+            // Choose the appropriate reading method based on data format
+            let result = match format {
+                DataFormat::Auto => {
+                    // Auto-detect format and read data
+                    read_auto_detect_data(&mut port, &mut format)
+                }
+                DataFormat::Binary => {
+                    // Read binary format data
+                    read_binary_sensor_data(&mut port)
+                }
+                DataFormat::Text => {
+                    // Read text format data and parse it
+                    let lines_result = read_serial_data(&mut port);
+                    match lines_result {
+                        Ok(lines) => {
+                            let mut sensor_data = Vec::new();
+                            for line in lines {
+                                if line.trim().is_empty() {
+                                    continue;
+                                }
+                                match parse_sensor_data(&line) {
+                                    Ok(data) => sensor_data.push(data),
+                                    Err(e) => eprintln!("Error parsing sensor data: {}", e),
+                                }
+                            }
+                            Ok(sensor_data)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+
+            // Process the result
+            match result {
+                Ok(data_vec) => {
                     // Reset error counter on successful read
                     consecutive_errors = 0;
 
-                    // Process all received lines
-                    for line in lines {
-                        if line.trim().is_empty() {
-                            // Skip empty lines
-                            continue;
-                        }
-
-                        // Parse the line into sensor data
-                        match parse_sensor_data(&line) {
-                            Ok(data) => {
-                                // Send the data to the writer thread
-                                if let Err(e) = data_callback(data) {
-                                    eprintln!("Error sending data to writer: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Error parsing sensor data: {}", e);
-                                // Continue reading even if there's a parse error
-                            }
+                    // Process all received data
+                    for data in data_vec {
+                        // Send the data to the writer thread
+                        if let Err(e) = data_callback(data) {
+                            eprintln!("Error sending data to writer: {}", e);
                         }
                     }
                 }
