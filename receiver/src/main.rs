@@ -49,11 +49,6 @@ struct Cli {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    // Validate port exists
-    if !cli.simulation && !std::path::Path::new(&cli.port).exists() {
-        anyhow::bail!("Serial port {} does not exist", cli.port);
-    }
-
     // Parse compression type
     let compression = CompressionType::from_str(&cli.compression)
         .map_err(|e| anyhow::anyhow!("Invalid compression algorithm: {}", e))?;
