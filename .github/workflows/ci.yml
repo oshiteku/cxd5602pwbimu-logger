@@ -23,12 +23,16 @@ jobs:
       
       - name: Check formatting
         run: cargo fmt -- --check
+        working-directory: ./receiver
       
       - name: Lint with clippy
         run: cargo clippy -- -D warnings
+        working-directory: ./receiver
       
       - name: Run tests
         run: cargo test
+        working-directory: ./receiver
       
       - name: Build release
         run: cargo build --release
+        working-directory: ./receiver
