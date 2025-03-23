@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
-use receiver::{CompressionType, FileWriterWorker, ParquetWriter, SerialReaderWorker};
+use receiver::{CompressionType, DataFormat, FileWriterWorker, ParquetWriter, SerialReaderWorker};
 
 #[derive(Parser, Debug)]
 #[command(name = "receiver")]
@@ -44,6 +44,10 @@ struct Cli {
     /// Enable simulation mode (generate test data instead of reading from serial port)
     #[arg(short = 'm', long)]
     simulation: bool,
+
+    /// Data format (auto, text, binary)
+    #[arg(short = 'd', long, default_value = "auto")]
+    data_format: String,
 }
 
 fn run() -> Result<()> {
@@ -52,6 +56,10 @@ fn run() -> Result<()> {
     // Parse compression type
     let compression = CompressionType::from_str(&cli.compression)
         .map_err(|e| anyhow::anyhow!("Invalid compression algorithm: {}", e))?;
+
+    // Parse data format
+    let data_format = DataFormat::from_str(&cli.data_format)
+        .map_err(|e| anyhow::anyhow!("Invalid data format: {}", e))?;
 
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&cli.output_dir)
@@ -65,6 +73,7 @@ fn run() -> Result<()> {
     println!("  File prefix: {}", cli.prefix);
     println!("  Compression: {}", cli.compression);
     println!("  Buffer size: {}", cli.buffer_size);
+    println!("  Data format: {}", cli.data_format);
     println!("  Simulation mode: {}", cli.simulation);
 
     // Set up ctrl-c handler
@@ -91,8 +100,9 @@ fn run() -> Result<()> {
         cli.prefix.clone(),
     );
 
-    // Create serial reader worker
-    let serial_reader = SerialReaderWorker::new(cli.port.clone(), cli.baud_rate);
+    // Create serial reader worker with specified data format
+    let serial_reader =
+        SerialReaderWorker::new_with_format(cli.port.clone(), cli.baud_rate, data_format);
 
     // Start file writer thread
     let running_writer = running.clone();
