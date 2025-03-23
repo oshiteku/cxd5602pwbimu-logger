@@ -18,7 +18,7 @@ struct Cli {
     port: String,
 
     /// Baud rate for serial connection
-    #[arg(short, long, default_value = "115200")]
+    #[arg(short, long, default_value = "921600")]
     baud_rate: u32,
 
     /// Output directory for Parquet files

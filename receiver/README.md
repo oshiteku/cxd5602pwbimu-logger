@@ -57,7 +57,7 @@ cargo run --release -- -p <SERIAL_PORT> [OPTIONS]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-p, --port` | Serial port (e.g., `/dev/ttyUSB0`, `COM3`) | (Required) |
-| `-b, --baud_rate` | Serial communication speed | 115200 |
+| `-b, --baud_rate` | Serial communication speed | 921600 |
 | `-o, --output_dir` | Directory for storing Parquet files | `./logs` |
 | `-s, --split_minutes` | Minutes between file rotations (0 = no rotation) | 0 |
 | `-f, --prefix` | Filename prefix for the output files | `sensor_log` |
@@ -69,7 +69,7 @@ cargo run --release -- -p <SERIAL_PORT> [OPTIONS]
 
 ```bash
 # Capture data from /dev/ttyUSB0 with 60-minute file rotation
-./target/release/receiver -p /dev/ttyUSB0 -b 115200 -o ./data -s 60 -c zstd
+./target/release/receiver -p /dev/ttyUSB0 -b 921600 -o ./data -s 60 -c zstd
 
 # Run in simulation mode for testing
 ./target/release/receiver -p dummy -m
