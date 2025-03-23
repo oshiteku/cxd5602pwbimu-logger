@@ -1,0 +1,41 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      
+      - name: Check formatting
+        run: cargo fmt -- --check
+        working-directory: ./receiver
+      
+      - name: Lint with clippy
+        run: cargo clippy -- -D warnings
+        working-directory: ./receiver
+      
+      - name: Run tests
+        run: cargo test
+        working-directory: ./receiver
+      
+      - name: Build release
+        run: cargo build --release
+        working-directory: ./receiver
