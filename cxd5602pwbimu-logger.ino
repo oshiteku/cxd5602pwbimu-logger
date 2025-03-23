@@ -267,6 +267,9 @@ void setup()
   logfunc_t logfunc;
   void *logopt = NULL;
 
+  Serial.begin(921600, SERIAL_8E1);
+  while (!Serial) {}
+
   // Use UART for logging
   logfunc = log2uart;
 
