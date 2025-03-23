@@ -92,22 +92,24 @@ pub fn parse_sensor_data(line: &str) -> Result<SensorData> {
     })
 }
 
-/// Read sensor data from a serial port
+/// Read all available sensor data lines from a serial port
 ///
 /// This improved version uses a fixed buffer to read multiple bytes at once
 /// and maintains state between calls to handle incomplete lines.
-pub fn read_serial_data(port: &mut Box<dyn SerialPort>) -> Result<String> {
+/// It processes all complete lines in the buffer at once to avoid data loss.
+pub fn read_serial_data(port: &mut Box<dyn SerialPort>) -> Result<Vec<String>> {
     let mut buf = [0u8; 4096]; // Large buffer to read multiple lines at once
+    let mut complete_lines = Vec::new();
 
     // Read available data into buffer
     let n = match port.read(&mut buf) {
         Ok(n) => n,
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(String::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
 
     if n == 0 {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
 
     // Convert received bytes to string
@@ -120,30 +122,271 @@ pub fn read_serial_data(port: &mut Box<dyn SerialPort>) -> Result<String> {
         // Append new data to existing buffer
         line_buffer.push_str(&data);
 
-        // Look for a complete line
-        if let Some(pos) = line_buffer.find('\n') {
+        // Process all complete lines in the buffer
+        while let Some(pos) = line_buffer.find('\n') {
             // Extract the complete line
             let complete_line = line_buffer[..pos].to_string();
+            complete_lines.push(complete_line);
 
             // Remove the processed line from the buffer
             *line_buffer = line_buffer[pos + 1..].to_string();
+        }
 
-            Ok(complete_line)
-        } else if let Some(pos) = line_buffer.find('\r') {
+        // Check for CR line endings as well
+        while let Some(pos) = line_buffer.find('\r') {
             // Handle carriage return line endings
             let complete_line = line_buffer[..pos].to_string();
+            complete_lines.push(complete_line);
+
+            // Remove the processed line from the buffer
             *line_buffer = line_buffer[pos + 1..].to_string();
-            Ok(complete_line)
-        } else {
-            // No complete line yet, return empty string
-            Ok(String::new())
         }
+
+        Ok(complete_lines)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Read};
+
+    // MockSerialPort to simulate serial port behavior in tests
+    struct MockSerialPort {
+        cursor: Cursor<Vec<u8>>,
+    }
+
+    impl MockSerialPort {
+        fn new(data: &[u8]) -> Self {
+            Self {
+                cursor: Cursor::new(data.to_vec()),
+            }
+        }
+    }
+
+    impl Read for MockSerialPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.cursor.read(buf)
+        }
+    }
+
+    impl std::io::Write for MockSerialPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // Just pretend we wrote everything
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl serialport::SerialPort for MockSerialPort {
+        fn name(&self) -> Option<String> {
+            Some("mock".to_string())
+        }
+
+        fn baud_rate(&self) -> serialport::Result<u32> {
+            Ok(115200)
+        }
+
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
+            Ok(serialport::DataBits::Eight)
+        }
+
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
+            Ok(serialport::FlowControl::None)
+        }
+
+        fn parity(&self) -> serialport::Result<serialport::Parity> {
+            Ok(serialport::Parity::None)
+        }
+
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
+            Ok(serialport::StopBits::One)
+        }
+
+        fn timeout(&self) -> std::time::Duration {
+            std::time::Duration::from_millis(100)
+        }
+
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn set_timeout(&mut self, _: std::time::Duration) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
+            Ok(true)
+        }
+
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
+            Ok(true)
+        }
+
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
+            Ok(false)
+        }
+
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
+            Ok(true)
+        }
+
+        fn bytes_to_read(&self) -> serialport::Result<u32> {
+            Ok(0)
+        }
+
+        fn bytes_to_write(&self) -> serialport::Result<u32> {
+            Ok(0)
+        }
+
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+            Err(serialport::Error::new(
+                serialport::ErrorKind::Io(std::io::ErrorKind::Other),
+                "Cannot clone mock serial port",
+            ))
+        }
+
+        fn set_break(&self) -> serialport::Result<()> {
+            Ok(())
+        }
+
+        fn clear_break(&self) -> serialport::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_read_serial_data_multiple_lines() {
+        // Initialize a mock serial port with multiple lines of data
+        let data = "00000123,41200000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n\
+                   00000124,41300000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n\
+                   00000125,41400000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n";
+
+        let mut port = Box::new(MockSerialPort::new(data.as_bytes())) as Box<dyn SerialPort>;
+
+        // Clear any existing line buffer
+        LINE_BUFFER.with(|buffer| {
+            *buffer.borrow_mut() = String::new();
+        });
+
+        // Read the data
+        let result = read_serial_data(&mut port).unwrap();
+
+        // Verify that all three lines were read
+        assert_eq!(result.len(), 3, "Should have read 3 complete lines");
+        assert_eq!(
+            result[0],
+            "00000123,41200000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000"
+        );
+        assert_eq!(
+            result[1],
+            "00000124,41300000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000"
+        );
+        assert_eq!(
+            result[2],
+            "00000125,41400000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000"
+        );
+    }
+
+    #[test]
+    fn test_read_serial_data_partial_line() {
+        // Initialize a mock serial port with an incomplete line
+        let data = "00000123,41200000,3F800000,3F800000,3F800000,3F80";
+        let mut port = Box::new(MockSerialPort::new(data.as_bytes())) as Box<dyn SerialPort>;
+
+        // Clear any existing line buffer
+        LINE_BUFFER.with(|buffer| {
+            *buffer.borrow_mut() = String::new();
+        });
+
+        // Read the data (should not find any complete lines)
+        let result = read_serial_data(&mut port).unwrap();
+        assert_eq!(result.len(), 0, "Should not have any complete lines");
+
+        // Check that the data is in the buffer
+        LINE_BUFFER.with(|buffer| {
+            let line_buffer = buffer.borrow();
+            assert_eq!(*line_buffer, data, "Data should be stored in buffer");
+        });
+
+        // Now add the rest of the line
+        let data2 = "0000,3F800000,3F800000\n";
+        let mut port = Box::new(MockSerialPort::new(data2.as_bytes())) as Box<dyn SerialPort>;
+
+        // Read the data (should find the complete line now)
+        let result = read_serial_data(&mut port).unwrap();
+        assert_eq!(result.len(), 1, "Should now have one complete line");
+        assert_eq!(
+            result[0],
+            "00000123,41200000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000"
+        );
+    }
+
+    #[test]
+    fn test_read_serial_data_multiple_reads() {
+        // First read: two complete lines and start of a third
+        let data1 = "00000123,41200000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n\
+                   00000124,41300000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n\
+                   00000125,414";
+        let mut port1 = Box::new(MockSerialPort::new(data1.as_bytes())) as Box<dyn SerialPort>;
+
+        // Clear any existing line buffer
+        LINE_BUFFER.with(|buffer| {
+            *buffer.borrow_mut() = String::new();
+        });
+
+        // First read
+        let result1 = read_serial_data(&mut port1).unwrap();
+        assert_eq!(result1.len(), 2, "Should have read 2 complete lines");
+
+        // Second read: rest of the third line and a fourth line
+        let data2 = "00000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n\
+                    00000126,41500000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000\n";
+        let mut port2 = Box::new(MockSerialPort::new(data2.as_bytes())) as Box<dyn SerialPort>;
+
+        // Second read
+        let result2 = read_serial_data(&mut port2).unwrap();
+        assert_eq!(result2.len(), 2, "Should have read 2 more complete lines");
+        assert_eq!(
+            result2[0],
+            "00000125,41400000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000"
+        );
+        assert_eq!(
+            result2[1],
+            "00000126,41500000,3F800000,3F800000,3F800000,3F800000,3F800000,3F800000"
+        );
+    }
 
     #[test]
     fn test_parse_sensor_data_valid() {

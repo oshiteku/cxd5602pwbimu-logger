@@ -150,28 +150,31 @@ impl SerialReaderWorker {
         let mut consecutive_errors = 0;
 
         while running.load(Ordering::SeqCst) {
-            // Try to read a line from the serial port
+            // Try to read lines from the serial port
             match read_serial_data(&mut port) {
-                Ok(line) => {
+                Ok(lines) => {
                     // Reset error counter on successful read
                     consecutive_errors = 0;
 
-                    if line.trim().is_empty() {
-                        // No complete line yet, continue reading
-                        continue;
-                    }
-
-                    // Parse the line into sensor data
-                    match parse_sensor_data(&line) {
-                        Ok(data) => {
-                            // Send the data to the writer thread
-                            if let Err(e) = data_callback(data) {
-                                eprintln!("Error sending data to writer: {}", e);
-                            }
+                    // Process all received lines
+                    for line in lines {
+                        if line.trim().is_empty() {
+                            // Skip empty lines
+                            continue;
                         }
-                        Err(e) => {
-                            eprintln!("Error parsing sensor data: {}", e);
-                            // Continue reading even if there's a parse error
+
+                        // Parse the line into sensor data
+                        match parse_sensor_data(&line) {
+                            Ok(data) => {
+                                // Send the data to the writer thread
+                                if let Err(e) = data_callback(data) {
+                                    eprintln!("Error sending data to writer: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error parsing sensor data: {}", e);
+                                // Continue reading even if there's a parse error
+                            }
                         }
                     }
                 }
